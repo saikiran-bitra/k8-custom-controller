@@ -1,0 +1,7 @@
+apiVersion: monitoring.mydomain.com/v1
+kind: PodLogMonitor
+metadata:
+  name: test-pod-monitor-cr
+spec:
+  namespace: hello-devops
+  logMessage: "error restart test"
