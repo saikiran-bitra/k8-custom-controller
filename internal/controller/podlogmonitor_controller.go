@@ -18,6 +18,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"bufio"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -81,7 +82,7 @@ func (r *PodLogMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reques
                         logger.Info("Skipping non-running pod", "pod", pod.Name, "phase", pod.Status.Phase)
                         continue
                 }
-		logger.Info("found pod", "pod", pod)
+		logger.Info("found pod", "pod", pod.Name)
 
 		if err := r.checkPodLogs(ctx, &pod, podLogMonitor.Spec.LogMessage, &podLogMonitor); err != nil {
 			logger.Error(err, "unable to check pod logs", "pod", pod.Name)
@@ -137,7 +138,7 @@ func (r *PodLogMonitorReconciler) checkPodLogs(ctx context.Context, pod *corev1.
 		orig := podLogMonitor.DeepCopy()
 		patch := client.MergeFrom(orig)
 		podLogMonitor.Status.LastRestartedPodName = pod.Name
-		podLogMonitor.Status.LastRestartTime = metav1.NewTime(time.Now())
+		podLogMonitor.Status.LastRestartTime = metav1.Now()
 
 		logger.Info("Updating PodLogMonitor status", "namespace", podLogMonitor.Namespace, "name", podLogMonitor.Name)
 
