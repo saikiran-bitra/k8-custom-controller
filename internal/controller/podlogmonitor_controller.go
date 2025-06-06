@@ -18,7 +18,6 @@ package controller
 import (
 	"context"
 	"strings"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,7 +60,7 @@ func (r *PodLogMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Fetch the PodLogMonitor resource
 	var podLogMonitor monitoringv1.PodLogMonitor
-	if err := r.Get(ctx, req.NamespacedName, &podLogMonitor); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: req.Name}, &podLogMonitor); err != nil {
 		logger.Error(err, "unable to fetch PodLogMonitor")
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
@@ -75,6 +74,13 @@ func (r *PodLogMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Iterate over the pods and check logs
 	for _, pod := range podList.Items {
+		if strings.HasPrefix(pod.Name, "pod-log-monitor") {
+                        continue // Skip controller pods or any pods starting with 'pod-log-monitor'
+                }
+                if pod.Status.Phase != corev1.PodRunning {
+                        logger.Info("Skipping non-running pod", "pod", pod.Name, "phase", pod.Status.Phase)
+                        continue
+                }
 		logger.Info("found pod", "pod", pod)
 
 		if err := r.checkPodLogs(ctx, &pod, podLogMonitor.Spec.LogMessage, &podLogMonitor); err != nil {
@@ -88,7 +94,7 @@ func (r *PodLogMonitorReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 func (r *PodLogMonitorReconciler) checkPodLogs(ctx context.Context, pod *corev1.Pod, logMessage string, podLogMonitor *monitoringv1.PodLogMonitor) error {
-	logger := log.FromContext(ctx).WithValues("podlogmonitor", pod)
+	logger := log.FromContext(ctx).WithValues("podlogmonitor", pod.Name)
 
 	// Check if we have the clientset; if not, create it
 	if r.clientset == nil {
@@ -106,7 +112,7 @@ func (r *PodLogMonitorReconciler) checkPodLogs(ctx context.Context, pod *corev1.
 		r.clientset = clientset
 	}
 	// Get the logs of the pod using the Kubernetes API
-	req := r.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{})
+	req := r.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{Follow: true,})
 	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		logger.Error(err, "unable to stream pod logs")
@@ -114,13 +120,10 @@ func (r *PodLogMonitorReconciler) checkPodLogs(ctx context.Context, pod *corev1.
 	}
 	defer podLogs.Close()
 	// Check if the log message exists in the pod logs
-	buf := make([]byte, 2000)
-	_, err = podLogs.Read(buf)
-	if err != nil {
-		logger.Error(err, "error reading pod logs")
-		return err
-	}
-	logStr := string(buf)
+	scanner := bufio.NewScanner(podLogs)
+        for scanner.Scan() {
+                logStr := scanner.Text()
+
 	if strings.Contains(logStr, logMessage) {
 		logger.Info("Found the specified log message, restarting pod")
 		// Restart the pod by deleting it (will be recreated by deployment/statefulset/etc.)
@@ -130,20 +133,80 @@ func (r *PodLogMonitorReconciler) checkPodLogs(ctx context.Context, pod *corev1.
 			return err
 		}
 		logger.Info("Pod restarted", "pod", pod.Name)
-		// Update the PodLogMonitor status
+		// Patch the PodLogMonitor status
+		orig := podLogMonitor.DeepCopy()
+		patch := client.MergeFrom(orig)
 		podLogMonitor.Status.LastRestartedPodName = pod.Name
 		podLogMonitor.Status.LastRestartTime = metav1.NewTime(time.Now())
 
-		if err := r.Status().Update(ctx, podLogMonitor); err != nil {
+		logger.Info("Updating PodLogMonitor status", "namespace", podLogMonitor.Namespace, "name", podLogMonitor.Name)
+
+		if err := r.Status().Patch(ctx, podLogMonitor, patch); err != nil {
 			logger.Error(err, "unable to update PodLogMonitor status")
 			return err
 		}
 	}
+	}
 	return nil
+}
+
+func (r *PodLogMonitorReconciler) startPodWatcher() {
+        config, err := rest.InClusterConfig()
+        if err != nil {
+                r.Log.Error(err, "failed to get in-cluster config")
+                return
+        }
+
+        clientset, err := kubernetes.NewForConfig(config)
+        if err != nil {
+                r.Log.Error(err, "failed to create clientset")
+                return
+        }
+        r.clientset = clientset
+
+        watcher, err := clientset.CoreV1().Pods("").Watch(context.TODO(), metav1.ListOptions{})
+        if err != nil {
+                r.Log.Error(err, "failed to start pod watcher")
+                return
+        }
+
+        for event := range watcher.ResultChan() {
+                pod, ok := event.Object.(*corev1.Pod)
+                if !ok {
+                        continue
+                }
+                if pod.Status.Phase == corev1.PodRunning && isPodReady(pod) {
+                        // check if this pod matches any CR
+                        var monitors monitoringv1.PodLogMonitorList
+                        if err := r.Client.List(context.TODO(), &monitors); err != nil {
+                                r.Log.Error(err, "failed to list PodLogMonitor resources")
+                                continue
+                        }
+                        for _, monitor := range monitors.Items {
+                                if monitor.Spec.Namespace == pod.Namespace {
+                                        // Call log checking logic
+                                        go r.checkPodLogs(context.TODO(), pod, monitor.Spec.LogMessage, &monitor)
+                                }
+                        }
+                }
+        }
+}
+
+func isPodReady(pod *corev1.Pod) bool {
+        if pod.Status.Phase != corev1.PodRunning {
+                return false
+        }
+        for _, cond := range pod.Status.Conditions {
+                if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+                        return true
+                }
+        }
+        return false
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PodLogMonitorReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	go r.startPodWatcher()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&monitoringv1.PodLogMonitor{}).
 		Complete(r)
