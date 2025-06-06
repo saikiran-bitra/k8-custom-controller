@@ -11,7 +11,7 @@ metadata:
   creationTimestamp: null
 rules:
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitor.mydomain.com
   resources:
   - podlogmonitors
   verbs:
@@ -23,7 +23,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitor.mydomain.com
   resources:
   - podlogmonitors/status
   verbs:
@@ -31,7 +31,7 @@ rules:
   - update
   - patch
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitor.mydomain.com
   resources:
   - podlogmonitors/finalizers
   verbs:
@@ -39,15 +39,12 @@ rules:
 - apiGroups: [""]
   resources:
   - pods
+  - pods/log
   verbs:
   - get
   - list
   - watch
-- apiGroups: [""]
-  resources:
-  - pods/log
-  verbs:
-  - get
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
