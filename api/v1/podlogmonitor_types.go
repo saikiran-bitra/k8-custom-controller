@@ -44,6 +44,7 @@ type PodLogMonitorStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
 
 // PodLogMonitor is the Schema for the podlogmonitors API.
 type PodLogMonitor struct {
